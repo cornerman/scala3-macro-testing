@@ -3,8 +3,10 @@ package test
 import scala.quoted.*
 
 object MyMacro {
+  def foo() = 1
   inline def router[T, R](t: T): Map[String, () => R] = ${MyMacro.routerImpl[T, R]('t)}
-  inline def client[T, R](r: () => R): T = ${MyMacro.clientImpl[T, R]('r)}
+  inline def client[T, R](r: () => R): Any = ${MyMacro.clientImpl[T, R]('r)}
+  inline def newInstance(): Any = ${MyMacro.newInstanceImpl}
 
   // def definedMethodsInType(tpe: Type): List[(MethodSymbol, Type)] = for {
   //   member <- tpe.members.toList
@@ -97,11 +99,10 @@ object MyMacro {
     val methods = definedMethodsInType[T]
     val validMethods = methods.filter(isValidMethod[R])
 
-    val x = '{
+    val expr = '{
       val value = ${t}
       _root_.scala.collection.immutable.Map.from[String, () => R](${Expr.ofSeq(
         validMethods.map { method =>
-          println(method.name)
           val call = Select('{value}.asTerm, method)
 
           val callWithArgs = method.paramSymss.foldLeft[Term](call)((accum, params) =>
@@ -117,86 +118,131 @@ object MyMacro {
       )})
     }
 
-    println(x.show)
+    // println(expr.show)
 
-    x
+    expr
   }
 
-  def clientImpl[T: Type, R: Type](r: Expr[() => R])(using Quotes): Expr[T] = {
+  def newInstanceImpl(using Quotes): Expr[Any] = {
     import quotes.reflect.*
 
+
+    println("HH")
+    val expr = Apply(Select.unique(New(TypeIdent(Symbol.requiredClass("Test"))), "<init>"), Nil)
+    println("HH")
+    println(expr.show)
+    expr.asExpr
+  }
+
+  def clientImpl[T: Type, R: Type](r: Expr[() => R])(using Quotes): Expr[Any] = {
+    import quotes.reflect.*
+
+    def resolveThis = {
+      var sym = Symbol.spliceOwner  // symbol of method where the macro is expanded
+      while sym.owner != null && !sym.isClassDef do
+        sym = sym.owner  // owner of a symbol is what encloses it: e.g. enclosing method or enclosing class
+      sym
+    }
+
+  val tf = new TreeMap {
+        override def transformTree(tree: Tree)(owner: Symbol): Tree = {
+          println(s"Visit tree: ${tree.getClass}")
+          super.transformTree(tree)(owner)
+        }
+
+        override  def transformTerm(tree: Term)(owner: Symbol): Term = {
+          println(s"Visit term: ${tree.getClass}")
+          tree match {
+            // case New(ident) =>
+            //   New(TypeIdent(Symbol.classSymbol("Test")).changeOwner(owner))
+            case Block(stats, Typed(expr, tpt)) =>
+              super.transformTerm(Block.copy(tree)(transformStats(stats)(owner), expr))(owner)
+              // super.transformTerm(Block.copy(tree)(transformStats(stats)(owner), Typed(expr, TypeTree.of[T])))(owner)
+
+            case other =>
+              super.transformTerm(tree)(owner)
+          }
+        }
+        override def transformStatement(tree: Statement)(owner: Symbol): Statement = {
+          println(s"Visit statement: ${tree.getClass}")
+          tree match {
+            case c @ ClassDef(name, cstr, parents, self, body) =>
+              println('{ class Foo }.asTerm)
+              // val constr = DefDef(Symbol.newMethod(c.symbol, cstr.name, cstr.returnTpt.tpe, cstr.symbol.flags, Symbol.noSymbol), _ => None)
+              val symbol = Symbol.classSymbol("Test")
+              val constr = DefDef(Symbol.newMethod(symbol, "<init>", MethodType(Nil)(_ => Nil, _ => TypeRepr.of[Unit]), Flags.EmptyFlags, Symbol.noSymbol), _ => None).changeOwner(symbol)
+              // println(cstr)
+              // println(constr)
+              ClassDef.copy(c)("Test", constr, List(TypeTree.of[T]), self, body)
+            case other =>
+              super.transformStatement(tree)(owner)
+          }
+        }
+
+  }
+
     val apiType = TypeRepr.of[T]
+    val tree = TypeTree.of[T]
 
     val methods = definedMethodsInType[T]
     val validMethods = methods.filter(isValidMethod[R])
 
-    val tree = TypeTree.of[T]
+    val body = validMethods.map { method =>
+      DefDef(method, _ => Some('{???}.asTerm))
+    }
 
-    val aClassDef = '{ class Test }
-    val Inlined(_, _, Block(list, _)) = aClassDef.asTerm
-    // val aClassDef = '{ new AnyRef {
-    //   def foo = 1
-    // } }
-    val orig = list.head.asInstanceOf[TypeDef].symbol
-    val next = Symbol.classSymbol(apiType.typeSymbol.fullName)
-    // val x = TypeDef.copy(TypeDef(Symbol.classSymbol("Test")))("Bla", '{}.asTerm).asExpr
 
-    // println(x.asTerm)
-    // val x = 
-// // Block(
-// //   List(
-//     TypeDef(
-//       $anon,
-//       Template(
-//         DefDef(<init>,List(List()),TypeTree[TypeRef(TermRef(ThisType(TypeRef(NoPrefix,module class <root>)),object scala),Unit)],EmptyTree),
-//         List(
-//           Apply(Select(New(Ident(AnyRef)),<init>),List())
-//         ),
-//         ValDef(_,EmptyTree,EmptyTree),
-//         List(
-//           DefDef(foo,List(),TypeTree[TypeRef(TermRef(ThisType(TypeRef(NoPrefix,module class <root>)),object scala),Int)],Literal(Constant(1)))
-//         )
-//       )
-//     )
-  // ),
-  // Typed(
-  //   Apply(Select(New(Ident($anon)),<init>),List()),
-  //   TypeTree[TypeRef(TermRef(ThisType(TypeRef(NoPrefix,module class java)),object lang),Object)]
-  // )
-// )
+    val exprX = '{ new {} }
+    val transformed = tf.transformTree(exprX.asTerm)(Symbol.spliceOwner)
+    println(transformed.show)
 
-    // val x = '{
-    //   // ${TypeDef(
-    //   //   $anon,
-    //   //   Template(
-    //   //     DefDef(<init>,List(List()),TypeTree[TypeRef(TermRef(ThisType(TypeRef(NoPrefix,module class <root>)),object scala),Unit)],EmptyTree),
-    //   //     List(Apply(Select(New(Ident(AnyRef)),<init>),List())),
-    //   //     ValDef(_,EmptyTree,EmptyTree),
-    //   //     List(DefDef(foobar,List(),Ident(Int),Literal(Constant(1))))
-    //   //   )
-    //   // )}
-    //   ${aClassDef.asExpr}
-    //   // ${
-    //   //   ClassDef
-    //   //   .copy(aClassDef)(
-    //   //     "Anon",
-    //   //     aClassDef.constructor,
-    //   //   parents = List.empty,
-    //   // selfOpt = None,
-    //   // body = Nil
-    //   // )
-    //   //   .asExpr
-    //   // }
-// // TypeDef('{}.asTerm)(name.toTypeName, Template.('{}.asTerm)(constr, parents, derived = Nil, selfOpt.getOrElse(tpd.EmptyValDef), body))
-    //   // ${New.copy('{def foo = 1}.asTerm.symbol.tree)(TypeTree.of[T]).asExpr}
-    //   // new Anon
-    //   ()
-    // }
+    // create a new ClassDef workaround
+    // val Inlined(_, _, Block((otherClass: ClassDef) :: _, Typed(Apply(Select(New(otherIdent), constructorName), _), typed))) = '{class Foo extends Dynamic; new Foo}.asTerm.changeOwner(Symbol.spliceOwner)
+    // val typeDef = TypeDef(Symbol.classSymbol("Bar"))
+    // val typeDef = TypeDef(otherClass.symbol)
+    // val classDef = otherClass
+    // val constr = DefDef(Symbol.newMethod(Symbol.spliceOwner, "<init>", TypeRepr.of[Unit], Flags.EmptyFlags, Symbol.noSymbol), _ => Some('{()}.asTerm))
+    val Inlined(_, _, Block((otherClass: ClassDef) :: _, _)) = '{class Foo }.asTerm
+    otherClass.symbol
+    val classDef = ClassDef.copy(otherClass)("Bar", otherClass.constructor, List(TypeTree.of[T]), None, Nil)
 
-    // println(x.asTerm)
-    // println(x.asTerm.show)
+    val realIdent = TypeIdent(classDef.symbol)
+    val ident = TypeIdent(Symbol.classSymbol("Bar"))
+    // val ident = realIdent
+    // val ident = Ref.term(TermRef(This(resolveThis).tpe, "Bar")).asInstanceOf[TypeTree]
+    // val ident = Ref.term(TermRef(This(Symbol.noSymbol).tpe, "Bar")).asInstanceOf[TypeTree]
+    // println(Symbol.spliceOwner.owner.owner.owner.declarations)
+    // println(resolveThis.symbol.declarations)
 
-    ???
+    // println(Symbol.spliceOwner)
+    // println(Select.unique(resolveThis, "Bar"))
+    // println(Ref.term(TermRef(resolveThis.tpe, "Bar")))
+
+    // println(TypeIdent(classDef.symbol))
+    // println(TypeIdent(Symbol.classSymbol("Bar")))
+    // println(TypeIdent(Symbol.classSymbol(classDef.symbol.name)))
+    // println(TypeIdent(Symbol.requiredClass("Bar")))
+    // println(TypeIdent(Symbol.requiredClass(classDef.symbol.name)))
+    // // println(Ident.copy(otherIdent)("Bar"))
+    // // println(otherIdent)
+    // println(realIdent)
+    // println(ident)
+    // println(TypeIdent(classDef.symbol).tpe)
+
+    val expr = Block(
+      List(classDef),
+      '{
+        MyMacro.newInstance()
+      }.asTerm
+      // Typed(Apply(Select.unique(New(TypeIdent(classDef.symbol)), "<init>"), Nil), TypeTree.of[T])
+    )
+
+    // println(expr.asTerm)
+    println(expr.show)
+
+    expr.asExpr
+    // '{${expr}.asInstanceOf[T]}
+    // transformed.asExpr
   }
 }
 
@@ -224,25 +270,3 @@ trait Test extends Upper {
   protected def NO2:Int
   private[test] def NO3 :Int
 }
-
-//     TypeDef(
-//       $anon,
-//       Template(
-//         DefDef(<init>,List(List()),TypeTree[TypeRef(TermRef(ThisType(TypeRef(NoPrefix,module class <root>)),object scala),Unit)],EmptyTree),
-//         List(Apply(Select(New(Ident(AnyRef)),<init>),List())),
-//         ValDef(_,EmptyTree,EmptyTree),
-//         List(DefDef(foobar,List(),Ident(Int),Literal(Constant(1))))
-//       )
-//     )
-// Block(
-//   List(TypeDef(Boo,Template(DefDef(<init>,List(List()),TypeTree[TypeRef(TermRef(ThisType(TypeRef(NoPrefix,module class <root>)),object scala),Unit)],EmptyTree),List(TypeTree[TypeRef(TermRef(ThisType(TypeRef(NoPrefix,module class java)),object lang),Object)]),ValDef(_,EmptyTree,EmptyTree),List()))),
-//   Block(List(TypeDef($anon,Template(DefDef(<init>,List(List()),TypeTree[TypeRef(TermRef(ThisType(TypeRef(NoPrefix,module class <root>)),object scala),Unit)],EmptyTree),List(Apply(Select(New(TypeTree[TypeRef(TermRef(ThisType(TypeRef(NoPrefix,module class java)),object lang),Object)]),<init>),List()), Ident(Boo)),ValDef(_,EmptyTree,EmptyTree),List()))),Typed(Typed(Apply(Select(New(Ident($anon)),<init>),List()),TypeTree[TypeRef(NoPrefix,trait Boo)]),TypeTree[TypeRef(TermRef(ThisType(TypeRef(NoPrefix,module class java)),object lang),Object)])))
-
-
-// Block(
-//   List(
-//     // TypeDef(Foos,Template(DefDef(<init>,List(List()),TypeTree[TypeRef(TermRef(ThisType(TypeRef(NoPrefix,module class <root>)),object scala),Unit)],EmptyTree),List(TypeTree[TypeRef(TermRef(ThisType(TypeRef(NoPrefix,module class java)),object lang),Object)]),ValDef(_,EmptyTree,EmptyTree),List())),
-//     TypeDef(Bars,Template(DefDef(<init>,List(List()),TypeTree[TypeRef(TermRef(ThisType(TypeRef(NoPrefix,module class <root>)),object scala),Unit)],EmptyTree),List(Apply(Select(New(TypeTree[TypeRef(TermRef(ThisType(TypeRef(NoPrefix,module class java)),object lang),Object)]),<init>),List()), Ident(Foos)),ValDef(_,EmptyTree,EmptyTree),List()))
-//   ),
-//   Literal(Constant(()))
-// )
