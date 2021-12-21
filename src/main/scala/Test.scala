@@ -2,11 +2,30 @@ package test
 
 import scala.quoted.*
 
+trait Thing {
+  type Type
+}
+
 object MyMacro {
+  transparent inline def genType[G[_[_]], F[_]]: Thing = ${MyMacro.genTypeImpl[G, F]}
+
+  def genTypeImpl[G[_[_]]: Type, F[_]: Type](using Quotes): Expr[Thing] = {
+    import quotes.reflect.*
+
+    '{
+      class MyThing(x: F[Int])
+
+      new Thing {
+        type Type = MyThing
+      }
+    }
+  }
+
   def foo() = 1
   inline def router[T, R](t: T): Map[String, () => R] = ${MyMacro.routerImpl[T, R]('t)}
   inline def client[T, R](r: () => R): Any = ${MyMacro.clientImpl[T, R]('r)}
   inline def newInstance(): Any = ${MyMacro.newInstanceImpl}
+
 
   // def definedMethodsInType(tpe: Type): List[(MethodSymbol, Type)] = for {
   //   member <- tpe.members.toList
@@ -65,11 +84,11 @@ object MyMacro {
   }
 
   ///TODO no overloads
-  def isValidMethod[R: Type](using q: Quotes): quotes.reflect.Symbol => Boolean = { method =>
+  def checkMethod[R: Type](using q: Quotes)(method: quotes.reflect.Symbol): Option[String] = {
     val isExpectedReturnTypeFun = isExpectedReturnType[R]
 
-    !method.paramSymss.headOption.exists(_.exists(_.isType)) && //isGeneric
-      isExpectedReturnTypeFun(method)
+    Option.when(method.paramSymss.headOption.exists(_.exists(_.isType)))(s"Method ${method.name} has a generic type parameter, this is not supported") orElse
+      Option.when(!isExpectedReturnTypeFun(method))(s"Method ${method.name} has unexpected return type")
   }
 
   def definedMethodsInType[T: Type](using Quotes): List[quotes.reflect.Symbol] = {
@@ -97,12 +116,15 @@ object MyMacro {
     import quotes.reflect.*
 
     val methods = definedMethodsInType[T]
-    val validMethods = methods.filter(isValidMethod[R])
+    val invalidMethods = methods.flatMap(checkMethod[R])
+    if (invalidMethods.nonEmpty) {
+      report.errorAndAbort(s"Invalid methods: ${invalidMethods.mkString(", ")}")
+    }
 
     val expr = '{
       val value = ${t}
       _root_.scala.collection.immutable.Map.from[String, () => R](${Expr.ofSeq(
-        validMethods.map { method =>
+        methods.map { method =>
           val call = Select('{value}.asTerm, method)
 
           val callWithArgs = method.paramSymss.foldLeft[Term](call)((accum, params) =>
@@ -156,8 +178,8 @@ object MyMacro {
             // case New(ident) =>
             //   New(TypeIdent(Symbol.classSymbol("Test")).changeOwner(owner))
             case Block(stats, Typed(expr, tpt)) =>
-              super.transformTerm(Block.copy(tree)(transformStats(stats)(owner), expr))(owner)
-              // super.transformTerm(Block.copy(tree)(transformStats(stats)(owner), Typed(expr, TypeTree.of[T])))(owner)
+              // super.transformTerm(Block.copy(tree)(transformStats(stats)(owner), expr))(owner)
+              super.transformTerm(Block.copy(tree)(transformStats(stats)(owner), Typed(expr, TypeTree.of[T])))(owner)
 
             case other =>
               super.transformTerm(tree)(owner)
@@ -173,7 +195,7 @@ object MyMacro {
               val constr = DefDef(Symbol.newMethod(symbol, "<init>", MethodType(Nil)(_ => Nil, _ => TypeRepr.of[Unit]), Flags.EmptyFlags, Symbol.noSymbol), _ => None).changeOwner(symbol)
               // println(cstr)
               // println(constr)
-              ClassDef.copy(c)("Test", constr, List(TypeTree.of[T]), self, body)
+              ClassDef.copy(c)("Test", cstr, List(TypeTree.of[T]), self, body)
             case other =>
               super.transformStatement(tree)(owner)
           }
@@ -185,16 +207,32 @@ object MyMacro {
     val tree = TypeTree.of[T]
 
     val methods = definedMethodsInType[T]
-    val validMethods = methods.filter(isValidMethod[R])
-
-    val body = validMethods.map { method =>
-      DefDef(method, _ => Some('{???}.asTerm))
+    val invalidMethods = methods.flatMap(checkMethod[R])
+    if (invalidMethods.nonEmpty) {
+      report.errorAndAbort(s"Invalid methods: ${invalidMethods.mkString(", ")}")
     }
 
+    val clsSymbol = Symbol.newClass(Symbol.spliceOwner, "Bar", List(TypeRepr.of[T]))
+    val clsConstructor = Symbol.newDefaultConstructor(clsSymbol)//.entered
+    // val clsConstructor = Symbol.newMethod(clsSymbol, "<init>", TypeRepr.of[Unit], Flags.EmptyFlags, Symbol.noSymbol)
 
-    val exprX = '{ new {} }
-    val transformed = tf.transformTree(exprX.asTerm)(Symbol.spliceOwner)
-    println(transformed.show)
+    val body = methods.map { method =>
+      // val newMethod = Symbol.newMethod(clsSymbol, method.name, TypeRepr.of[R], Flags.Override, method.privateWithin.fold(Symbol.noSymbol)(_.typeSymbol))
+      val newMethod = Symbol.newMethod(clsSymbol, method.name, TypeRepr.of[R], Flags.EmptyFlags, method.privateWithin.fold(Symbol.noSymbol)(_.typeSymbol))
+      // val newMethod = method.tree.changeOwner(method).symbol
+      // DefDef(newMethod, _ => Some('{${r}()}.asTerm))
+      DefDef(newMethod, _ => Some(Literal(IntConstant(1))))
+      // val Inlined(_, _, Block(List(defdef), _)) = '{
+      //   def run: Int = 1
+      // }.asTerm
+
+      // defdef
+    }
+    val classDef = ClassDef(clsSymbol, clsConstructor /*DefDef(clsConstructor, _ => None)*/, body)
+
+    // val exprX = '{ new {} }
+    // val transformed = tf.transformTree(exprX.asTerm)(Symbol.spliceOwner)
+    // println(transformed.show)
 
     // create a new ClassDef workaround
     // val Inlined(_, _, Block((otherClass: ClassDef) :: _, Typed(Apply(Select(New(otherIdent), constructorName), _), typed))) = '{class Foo extends Dynamic; new Foo}.asTerm.changeOwner(Symbol.spliceOwner)
@@ -204,9 +242,14 @@ object MyMacro {
     // val constr = DefDef(Symbol.newMethod(Symbol.spliceOwner, "<init>", TypeRepr.of[Unit], Flags.EmptyFlags, Symbol.noSymbol), _ => Some('{()}.asTerm))
     val Inlined(_, _, Block((otherClass: ClassDef) :: _, _)) = '{class Foo }.asTerm
     otherClass.symbol
-    val classDef = ClassDef.copy(otherClass)("Bar", otherClass.constructor, List(TypeTree.of[T]), None, Nil)
+    val constr = DefDef(Symbol.newMethod(Symbol.spliceOwner, "<init>", MethodType(Nil)(_ => Nil, _ => TypeRepr.of[Unit]), Flags.EmptyFlags, Symbol.noSymbol), _ => None)
+    // val typeDef = TypeDef(Symbol.newClass(Symbol.spliceOwner, "Bar"))
+    // val typeDef = TypeDef(constr.symbol)
+    // println(typeDef.getClass)
+    // val classDef = ClassDef.copy(typeDef)("Bar", constr, List(TypeTree.of[T]), None, Nil)
+    // val classDef = ClassDef("Bar", constr, List(TypeTree.of[T]), None, body)
 
-    val realIdent = TypeIdent(classDef.symbol)
+    // val realIdent = TypeIdent(classDef.symbol)
     val ident = TypeIdent(Symbol.classSymbol("Bar"))
     // val ident = realIdent
     // val ident = Ref.term(TermRef(This(resolveThis).tpe, "Bar")).asInstanceOf[TypeTree]
@@ -231,16 +274,25 @@ object MyMacro {
 
     val expr = Block(
       List(classDef),
-      '{
-        MyMacro.newInstance()
-      }.asTerm
       // Typed(Apply(Select.unique(New(TypeIdent(classDef.symbol)), "<init>"), Nil), TypeTree.of[T])
+      // Apply(Select.unique(New(TypeIdent(classDef.symbol)), "<init>"), Nil)
+      '{???}.asTerm
     )
+    val expr2 = '{
+      class Bar() extends test.Command {
+        def run: Int = 1
+      }
+      ???
+    }.asTerm
+    // val expr = ClassDef.anon(List(TypeTree.of[T]), None, body)
 
-    // println(expr.asTerm)
+    println(expr2)
+    println(expr2.show)
+    println(expr)
     println(expr.show)
 
-    expr.asExpr
+    expr.asExprOf[T]
+    // expr2.asExprOf[T]
     // '{${expr}.asInstanceOf[T]}
     // transformed.asExpr
   }
@@ -270,3 +322,22 @@ trait Test extends Upper {
   protected def NO2:Int
   private[test] def NO3 :Int
 }
+// Block(
+//   List(
+//     TypeDef(
+//       Bar,
+//       Template(
+//         DefDef(<init>,List(List()),TypeTree[TypeRef(NoPrefix,class Bar)],EmptyTree),
+//         List(
+//           Apply(Select(New(TypeTree[TypeRef(TermRef(ThisType(TypeRef(NoPrefix,module class java)),object lang),Object)]),<init>),List()),
+//           TypeTree[TypeRef(ThisType(TypeRef(NoPrefix,module class test)),class Command)]
+//         ),
+//         ValDef(_,EmptyTree,EmptyTree),
+//         List(
+//           DefDef(run,List(),TypeTree[TypeRef(TermRef(ThisType(TypeRef(NoPrefix,module class <root>)),object scala),class Int)],Inlined(Ident(MyMacro$),List(),Ident(???)))
+//         )
+//       )
+//     )
+//   ),
+//   Inlined(Ident(MyMacro$),List(),Ident(???))
+// )
