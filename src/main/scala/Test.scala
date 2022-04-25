@@ -23,7 +23,7 @@ object MyMacro {
 
   def foo() = 1
   inline def router[T, R](t: T): Map[String, () => R] = ${MyMacro.routerImpl[T, R]('t)}
-  inline def client[T, R](r: () => R): Any = ${MyMacro.clientImpl[T, R]('r)}
+  transparent inline def client[T, R](r: () => R): Any = ${MyMacro.clientImpl[T, R]('r)}
   inline def newInstance(): Any = ${MyMacro.newInstanceImpl}
 
 
@@ -66,6 +66,20 @@ object MyMacro {
   //    case (_, x :: Nil) => Right(x)
   //    case (k, _) => Left(s"""method $k is overloaded (rename the method or add a @PathName("other-name"))""")
   //  }.toList
+
+  def returnType(using Quotes): quotes.reflect.Symbol => quotes.reflect.TypeRepr = { method =>
+    import quotes.reflect.*
+
+    method.tree match {
+      case DefDef(_,_,typedTree,_) =>
+          TypeRepr.of(using typedTree.tpe.asType)
+    //     TypeRepr.of(using typedTree.tpe.asType) match {
+    //       case AppliedType(repr, _) => repr
+    //       case _ => false
+    //     }
+      case _ => report.errorAndAbort(s"Cannot detect type of method: ${method.name}")
+    }
+  }
 
   def isExpectedReturnType[R: Type](using Quotes): quotes.reflect.Symbol => Boolean = { method =>
     import quotes.reflect.*
@@ -149,9 +163,7 @@ object MyMacro {
     import quotes.reflect.*
 
 
-    println("HH")
     val expr = Apply(Select.unique(New(TypeIdent(Symbol.requiredClass("Test"))), "<init>"), Nil)
-    println("HH")
     println(expr.show)
     expr.asExpr
   }
@@ -159,49 +171,15 @@ object MyMacro {
   def clientImpl[T: Type, R: Type](r: Expr[() => R])(using Quotes): Expr[Any] = {
     import quotes.reflect.*
 
+    val returnTypeFun = returnType
+
+
     def resolveThis = {
       var sym = Symbol.spliceOwner  // symbol of method where the macro is expanded
       while sym.owner != null && !sym.isClassDef do
         sym = sym.owner  // owner of a symbol is what encloses it: e.g. enclosing method or enclosing class
       sym
     }
-
-  val tf = new TreeMap {
-        override def transformTree(tree: Tree)(owner: Symbol): Tree = {
-          println(s"Visit tree: ${tree.getClass}")
-          super.transformTree(tree)(owner)
-        }
-
-        override  def transformTerm(tree: Term)(owner: Symbol): Term = {
-          println(s"Visit term: ${tree.getClass}")
-          tree match {
-            // case New(ident) =>
-            //   New(TypeIdent(Symbol.classSymbol("Test")).changeOwner(owner))
-            case Block(stats, Typed(expr, tpt)) =>
-              // super.transformTerm(Block.copy(tree)(transformStats(stats)(owner), expr))(owner)
-              super.transformTerm(Block.copy(tree)(transformStats(stats)(owner), Typed(expr, TypeTree.of[T])))(owner)
-
-            case other =>
-              super.transformTerm(tree)(owner)
-          }
-        }
-        override def transformStatement(tree: Statement)(owner: Symbol): Statement = {
-          println(s"Visit statement: ${tree.getClass}")
-          tree match {
-            case c @ ClassDef(name, cstr, parents, self, body) =>
-              println('{ class Foo }.asTerm)
-              // val constr = DefDef(Symbol.newMethod(c.symbol, cstr.name, cstr.returnTpt.tpe, cstr.symbol.flags, Symbol.noSymbol), _ => None)
-              val symbol = Symbol.classSymbol("Test")
-              val constr = DefDef(Symbol.newMethod(symbol, "<init>", MethodType(Nil)(_ => Nil, _ => TypeRepr.of[Unit]), Flags.EmptyFlags, Symbol.noSymbol), _ => None).changeOwner(symbol)
-              // println(cstr)
-              // println(constr)
-              ClassDef.copy(c)("Test", cstr, List(TypeTree.of[T]), self, body)
-            case other =>
-              super.transformStatement(tree)(owner)
-          }
-        }
-
-  }
 
     val apiType = TypeRepr.of[T]
     val tree = TypeTree.of[T]
@@ -212,132 +190,37 @@ object MyMacro {
       report.errorAndAbort(s"Invalid methods: ${invalidMethods.mkString(", ")}")
     }
 
-    val clsSymbol = Symbol.newClass(Symbol.spliceOwner, "Bar", List(TypeRepr.of[T]))
-    val clsConstructor = Symbol.newDefaultConstructor(clsSymbol)//.entered
-    // val clsConstructor = Symbol.newMethod(clsSymbol, "<init>", TypeRepr.of[Unit], Flags.EmptyFlags, Symbol.noSymbol)
+    val name = "_Anon"
+    val parents = List(TypeTree.of[Object])//, TypeTree.of[T])
 
-    val body = methods.map { method =>
-      // val newMethod = Symbol.newMethod(clsSymbol, method.name, TypeRepr.of[R], Flags.Override, method.privateWithin.fold(Symbol.noSymbol)(_.typeSymbol))
-      val newMethod = Symbol.newMethod(clsSymbol, method.name, TypeRepr.of[R], Flags.EmptyFlags, method.privateWithin.fold(Symbol.noSymbol)(_.typeSymbol))
-      // val newMethod = method.tree.changeOwner(method).symbol
-      // DefDef(newMethod, _ => Some('{${r}()}.asTerm))
-      DefDef(newMethod, _ => Some(Literal(IntConstant(1))))
-      // val Inlined(_, _, Block(List(defdef), _)) = '{
-      //   def run: Int = 1
-      // }.asTerm
-
-      // defdef
-    }
-    val classDef = ClassDef(clsSymbol, clsConstructor /*DefDef(clsConstructor, _ => None)*/, body)
-
-    // val exprX = '{ new {} }
-    // val transformed = tf.transformTree(exprX.asTerm)(Symbol.spliceOwner)
-    // println(transformed.show)
-
-    // create a new ClassDef workaround
-    // val Inlined(_, _, Block((otherClass: ClassDef) :: _, Typed(Apply(Select(New(otherIdent), constructorName), _), typed))) = '{class Foo extends Dynamic; new Foo}.asTerm.changeOwner(Symbol.spliceOwner)
-    // val typeDef = TypeDef(Symbol.classSymbol("Bar"))
-    // val typeDef = TypeDef(otherClass.symbol)
-    // val classDef = otherClass
-    // val constr = DefDef(Symbol.newMethod(Symbol.spliceOwner, "<init>", TypeRepr.of[Unit], Flags.EmptyFlags, Symbol.noSymbol), _ => Some('{()}.asTerm))
-    val Inlined(_, _, Block((otherClass: ClassDef) :: _, _)) = '{class Foo }.asTerm
-    otherClass.symbol
-    val constr = DefDef(Symbol.newMethod(Symbol.spliceOwner, "<init>", MethodType(Nil)(_ => Nil, _ => TypeRepr.of[Unit]), Flags.EmptyFlags, Symbol.noSymbol), _ => None)
-    // val typeDef = TypeDef(Symbol.newClass(Symbol.spliceOwner, "Bar"))
-    // val typeDef = TypeDef(constr.symbol)
-    // println(typeDef.getClass)
-    // val classDef = ClassDef.copy(typeDef)("Bar", constr, List(TypeTree.of[T]), None, Nil)
-    // val classDef = ClassDef("Bar", constr, List(TypeTree.of[T]), None, body)
-
-    // val realIdent = TypeIdent(classDef.symbol)
-    val ident = TypeIdent(Symbol.classSymbol("Bar"))
-    // val ident = realIdent
-    // val ident = Ref.term(TermRef(This(resolveThis).tpe, "Bar")).asInstanceOf[TypeTree]
-    // val ident = Ref.term(TermRef(This(Symbol.noSymbol).tpe, "Bar")).asInstanceOf[TypeTree]
-    // println(Symbol.spliceOwner.owner.owner.owner.declarations)
-    // println(resolveThis.symbol.declarations)
-
-    // println(Symbol.spliceOwner)
-    // println(Select.unique(resolveThis, "Bar"))
-    // println(Ref.term(TermRef(resolveThis.tpe, "Bar")))
-
-    // println(TypeIdent(classDef.symbol))
-    // println(TypeIdent(Symbol.classSymbol("Bar")))
-    // println(TypeIdent(Symbol.classSymbol(classDef.symbol.name)))
-    // println(TypeIdent(Symbol.requiredClass("Bar")))
-    // println(TypeIdent(Symbol.requiredClass(classDef.symbol.name)))
-    // // println(Ident.copy(otherIdent)("Bar"))
-    // // println(otherIdent)
-    // println(realIdent)
-    // println(ident)
-    // println(TypeIdent(classDef.symbol).tpe)
-
-    val expr = Block(
-      List(classDef),
-      // Typed(Apply(Select.unique(New(TypeIdent(classDef.symbol)), "<init>"), Nil), TypeTree.of[T])
-      // Apply(Select.unique(New(TypeIdent(classDef.symbol)), "<init>"), Nil)
-      '{???}.asTerm
-    )
-    val expr2 = '{
-      class Bar() extends test.Command {
-        def run: Int = 1
+    def decls(cls: Symbol): List[Symbol] = methods.map { method =>
+      method.tree match {
+        case d: DefDef =>
+            val DefDef(name,clauses,typedTree,_) = d.changeOwner(cls)
+            val tpeRepr = TypeRepr.of(using typedTree.changeOwner(cls).tpe.asType)
+            val names = clauses.flatMap(_.params.collect {
+              case v: ValDef =>
+                v.name
+            })
+            val tpes = clauses.flatMap(_.params.collect {
+              case v: ValDef => v.tpt.tpe
+            })
+            clauses.flatMap(_.params.collect {
+              case v: TypeDef => v.name
+            })
+            println(clauses)
+            Symbol.newMethod(cls, name, MethodType(Nil)(_ => Nil, _ => TypeRepr.of[Int]), flags = Flags.EmptyFlags /*TODO: method.flags */, privateWithin = Symbol.noSymbol /*TODO: method.privateWithin */)
+            // Symbol.newMethod(cls, name, MethodType(names)(_ => tpes, _ => tpeRepr), flags = Flags.EmptyFlags /*TODO: method.flags */, privateWithin = Symbol.noSymbol /*TODO: method.privateWithin */)
+        case _ => report.errorAndAbort(s"Cannot detect type of method: ${method.name}")
       }
-      ???
-    }.asTerm
-    // val expr = ClassDef.anon(List(TypeTree.of[T]), None, body)
+    }
 
-    println(expr2)
-    println(expr2.show)
-    println(expr)
-    println(expr.show)
-
-    expr.asExprOf[T]
-    // expr2.asExprOf[T]
-    // '{${expr}.asInstanceOf[T]}
-    // transformed.asExpr
+    val cls = Symbol.newClass(Symbol.spliceOwner, name, parents = parents.map(_.tpe), decls, selfType = None)
+    val body = cls.declaredMethods.map { method =>
+      DefDef(method, argss => Some('{???}.asTerm))
+    }
+    val clsDef = ClassDef(cls, parents, body = body)
+    val newCls = Typed(Apply(Select(New(TypeIdent(cls)), cls.primaryConstructor), Nil), TypeTree.of[Object])//, TypeTree.of[T])
+    Block(List(clsDef), newCls).asExpr //Of[T]
   }
 }
-
-trait AResult[Warum] {
-}
-
-trait Upper {
-  def theonlyValidForNowInherited: AResult[Int]
-}
-
-trait Test extends Upper {
-  def foo: Int
-  def fooWith(): Int
-  def foobar(s:String): Int
-  def heinz: String
-
-  def NOHeinz: Int = 1
-
-  def theonlyValidForNow: AResult[Int]
-  // def theonlyValidForNow2ButNotAbstract: AResult[Int] = null
-
-  def generic[T]: Int
-
-  private def NO: Int = 1
-  protected def NO2:Int
-  private[test] def NO3 :Int
-}
-// Block(
-//   List(
-//     TypeDef(
-//       Bar,
-//       Template(
-//         DefDef(<init>,List(List()),TypeTree[TypeRef(NoPrefix,class Bar)],EmptyTree),
-//         List(
-//           Apply(Select(New(TypeTree[TypeRef(TermRef(ThisType(TypeRef(NoPrefix,module class java)),object lang),Object)]),<init>),List()),
-//           TypeTree[TypeRef(ThisType(TypeRef(NoPrefix,module class test)),class Command)]
-//         ),
-//         ValDef(_,EmptyTree,EmptyTree),
-//         List(
-//           DefDef(run,List(),TypeTree[TypeRef(TermRef(ThisType(TypeRef(NoPrefix,module class <root>)),object scala),class Int)],Inlined(Ident(MyMacro$),List(),Ident(???)))
-//         )
-//       )
-//     )
-//   ),
-//   Inlined(Ident(MyMacro$),List(),Ident(???))
-// )

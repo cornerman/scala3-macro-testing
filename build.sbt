@@ -1,4 +1,4 @@
-scalaVersion := "3.1.2-RC1-bin-SNAPSHOT"
+scalaVersion := "3.2.0-RC1-bin-20220419-ef16034-NIGHTLY"
 
 scalacOptions += "-language:dynamics"
 scalacOptions += "-Xcheck-macros"
