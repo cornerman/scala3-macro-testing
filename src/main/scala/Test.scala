@@ -73,7 +73,9 @@ object MyMacro {
           val names = clauses.flatMap(_.params.collect { case v: ValDef => v.name })
           val tpes = clauses.flatMap(_.params.collect { case v: ValDef => v.tpt.tpe })
 
-          Symbol.newMethod(cls, name, MethodType(names)(_ => tpes, _ => tpeRepr), flags = Flags.EmptyFlags /*TODO: method.flags */, privateWithin = method.privateWithin.fold(Symbol.noSymbol)(_.typeSymbol))
+          // nullary methods
+          val methodType = if (clauses.isEmpty) ByNameType(tpeRepr) else MethodType(names)(_ => tpes, _ => tpeRepr)
+          Symbol.newMethod(cls, name, methodType, flags = Flags.EmptyFlags /*TODO: method.flags */, privateWithin = method.privateWithin.fold(Symbol.noSymbol)(_.typeSymbol))
         case _ =>
           report.errorAndAbort(s"Cannot detect type of method: ${method.name}")
       }
