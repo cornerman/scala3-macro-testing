@@ -20,5 +20,5 @@ def main: Unit = {
 
   println(myRouter("run")("11")) // 12
   println(myRouter("run2")("2")) // 3
-  println(myRouter("run2")("1")) // 2
+  println(myRouter("run3")("1")) // 2
 }

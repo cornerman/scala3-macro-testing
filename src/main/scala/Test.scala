@@ -107,15 +107,15 @@ object MyMacro {
 
 
     val methodDefinitions = methods.map { symbol =>
-        val lambdaType = MethodType(List("arg1"))(
-        _ => List(TypeRepr.of[String]),
-        _ => TypeRepr.of[Int],
-        )
-        
-        val lambda = Lambda(Symbol.spliceOwner, lambdaType, { (_, args) =>
-          val terms = args.map(_.asExpr.asTerm)
-          Apply(Select(impl.asTerm, symbol), terms)
-        })
+      val lambdaType = MethodType(List("arg1"))(
+      _ => List(TypeRepr.of[String]),
+      _ => TypeRepr.of[Int],
+      )
+      
+      val lambda = Lambda(Symbol.spliceOwner, lambdaType, { (_, args) =>
+        val terms = args.map(_.asExpr.asTerm)
+        Apply(Select(impl.asTerm, symbol), terms)
+      })
 
       '{
         (${Expr(symbol.name)}, ${lambda.asExprOf[String => R]})
